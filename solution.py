@@ -274,6 +274,17 @@ class Knowledge:
                 continue  # intro offers are not the card's APR
             is_biz = f.qualifiers.get("segment") == "business" or f.subject.startswith("Business")
             cards.setdefault(f.subject, (f, is_biz))
+        # Collapse label variants of the same card at the same APR
+        # ("Platinum Visa" vs "Platinum Visa Rate" on different pages).
+        by_value: dict[str, list[str]] = {}
+        for subj, (f, _b) in cards.items():
+            by_value.setdefault(f.value.text, []).append(subj)
+        drop = set()
+        for subjects in by_value.values():
+            if len(subjects) > 1:
+                keep = min(subjects, key=len)
+                drop.update(s for s in subjects if s != keep)
+        cards = {s: v for s, v in cards.items() if s not in drop}
         if not cards:
             return None
         # A generic cards question wants the whole family; a named card is
