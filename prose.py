@@ -79,8 +79,8 @@ def rank_sentences(sentences: list[str], question: str, count: int = 2) -> tuple
     if not scored:
         return "", 0.0
     best = max(s[0] for s in scored)
-    top_entry = sorted(scored, key=lambda s: (-s[0], s[1]))[0]
-    chosen = sorted(sorted(scored, key=lambda s: (-s[0], s[1]))[:count], key=lambda s: s[1])
+    by_score = sorted(scored, key=lambda s: (-s[0], s[1]))
+    chosen = sorted(by_score[:count], key=lambda s: s[1])
     # Anaphora carry: "This initiative provides up to $15,000..." only
     # makes sense (and only carries the answer) right after the sentence
     # that names the program. Append any chosen sentence's $-bearing
@@ -158,7 +158,7 @@ class ProseIndex:
     def build(cls, pages: list[Page], snapshot_id: str) -> "ProseIndex":
         from branches import page_date
         idx = cls()
-        df: Counter = Counter()
+        doc_freq: Counter = Counter()
         for page in pages:
             body = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", page.markdown)
             p_date = page_date(page.markdown)
@@ -184,9 +184,9 @@ class ProseIndex:
                                   page_date=p_date)
                     idx.chunks.append(chunk)
                     idx.by_url.setdefault(page.url, []).append(chunk)
-                    df.update(counts.keys())
+                    doc_freq.update(counts.keys())
         n = max(len(idx.chunks), 1)
-        idx.idf = {t: math.log(1 + n / (1 + c)) for t, c in df.items()}
+        idx.idf = {t: math.log(1 + n / (1 + c)) for t, c in doc_freq.items()}
         # Inverted index so search touches only chunks that mention a
         # query token (a full scan per question was the latency tail).
         idx.postings = {}
@@ -203,8 +203,8 @@ class ProseIndex:
         for t in q_tokens:
             candidate_ids.update(self.postings.get(t, ()))
         scored: list[tuple[float, Chunk]] = []
-        for ci in candidate_ids:
-            chunk = self.chunks[ci]
+        for chunk_id in candidate_ids:
+            chunk = self.chunks[chunk_id]
             score = 0.0
             for t in q_tokens:
                 tf = chunk.counts.get(t, 0)
@@ -218,18 +218,3 @@ class ProseIndex:
         scored.sort(key=lambda sc: -sc[0])
         return scored[:top_n]
 
-
-def best_sentences(chunk: Chunk, question: str, count: int = 2) -> tuple[str, int]:
-    """The `count` sentences of the chunk most relevant to the question,
-    in original order; returns (text, distinctive token hits)."""
-    q_tokens = {t for t in _tokens(question) if t not in _STOP}
-    ranked = []
-    for i, sent in enumerate(chunk.sentences):
-        s_tokens = _tokens(sent)
-        hits = len(q_tokens & s_tokens)
-        rare = sum(1 for t in q_tokens & s_tokens if len(t) > 3)
-        ranked.append((hits + rare, i, sent))
-    ranked.sort(key=lambda r: (-r[0], r[1]))
-    chosen = sorted(ranked[:count], key=lambda r: r[1])
-    total_hits = sum(r[0] for r in ranked[:count])
-    return " ".join(r[2] for r in chosen), total_hits

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -98,7 +99,6 @@ REFUSALS = [
 
 
 def _numbers(text: str) -> set:
-    import re
     return set(re.findall(r"\d+(?:\.\d+)?", text or ""))
 
 

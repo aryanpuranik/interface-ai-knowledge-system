@@ -13,6 +13,7 @@ of guessing. See NOTES.md for the full design and decision log.
 
 Standard library only; no API keys; no network.
 """
+import re
 import sys
 from pathlib import Path
 
@@ -54,7 +55,10 @@ except ImportError:  # standalone use (tests, demo): same shapes, local copies
             resolution: Optional[str] = None
             reason: Optional[str] = None
 
-from query import find_facts, normalise_question  # noqa: E402
+from branches import resolve_claim  # noqa: E402
+from extract import parse_qualifiers  # noqa: E402
+from prose import _ORDINALS, rank_sentences  # noqa: E402
+from query import _tokens, find_facts, normalise_question  # noqa: E402
 from store import FactStore  # noqa: E402
 
 _REFUSAL = ("I don't know — that isn't listed on Dupaco's website in the "
@@ -116,9 +120,9 @@ class Knowledge:
         # Branch registry, navigation links, member-service
         # questions — none of these live in rate tables.
         for attempt in (self._branch_answer, self._link_answer, self._service_answer):
-            composed_branch = attempt(state, question, q)
-            if composed_branch is not None:
-                return composed_branch
+            handled = attempt(state, question, q)
+            if handled is not None:
+                return handled
 
         verified = self._verification_answer(state, question, q)
         if verified is not None:
@@ -140,17 +144,15 @@ class Knowledge:
         # A win needs real subject evidence: two distinctive subject tokens,
         # or one plus an exact qualifier match (term/band/cap). A single
         # generic subject word ("program") is how wrong products sneak in.
-        from extract import parse_qualifiers as _pq
-        q_qual = _pq(question, "")
+        q_qual = parse_qualifiers(question, "")
         qual_match = any(k in q_qual and fact.qualifiers.get(k) == q_qual[k]
                          for k in ("term_months", "balance_band", "loan_cap"))
         # At least one *alphabetic* subject token must match (stemmed):
         # digit-only overlap (a shared balance band) is not evidence
         # about a product.
-        from query import _tokens as _qtokens
-        q_tok = _qtokens(question)
+        q_tok = _tokens(question)
         alpha_match = any(t.isalpha() and len(t) > 2 and t in q_tok
-                          for t in _qtokens(fact.subject))
+                          for t in _tokens(fact.subject))
         if (distinctive < 1 or score < 5 or not alpha_match
                 or not (s_distinctive >= 2 or (s_distinctive >= 1 and qual_match))):
             return self._prose_or_refuse(state, question, q)
@@ -164,10 +166,9 @@ class Knowledge:
     def _superlative_fact(state, top):
         """'Highest X APY' = the maximum-value fact in the winner's family,
         searched across the whole resolved store, not just the top ranks."""
-        import re as _re
-        core = _re.sub(r"\$.*$", "", top.subject).strip().lower()
+        core = re.sub(r"\$.*$", "", top.subject).strip().lower()
         family = [f for f in state.winners().values()
-                  if _re.sub(r"\$.*$", "", f.subject).strip().lower() == core
+                  if re.sub(r"\$.*$", "", f.subject).strip().lower() == core
                   and f.metric == top.metric and f.value.unit == "%"
                   and f.qualifiers.get("segment") == top.qualifiers.get("segment")]
         if family:
@@ -177,8 +178,7 @@ class Knowledge:
     def _verification_answer(self, state, question, q):
         """'Do any savings tiers pay X%?' — verify against the family and
         answer with the family's real maximum, without restating X."""
-        import re as _re
-        if not _re.search(r"\b(do|does|is there|are there)\b", q) or "%" not in question:
+        if not re.search(r"\b(do|does|is there|are there)\b", q) or "%" not in question:
             return None
         family_name = "Share Savings" if "savings" in q else None
         if family_name is None:
@@ -187,7 +187,7 @@ class Knowledge:
                  if f.subject.lower().startswith(family_name.lower()) and f.metric == "APY"]
         if not facts:
             return None
-        asked = float(_re.search(r"(\d+(?:\.\d+)?)\s*%", question).group(1))
+        asked = float(re.search(r"(\d+(?:\.\d+)?)\s*%", question).group(1))
         if any(abs(f.value.nums[0] - asked) < 1e-9 for f in facts):
             return None  # it does exist; let the normal path answer
         best = max(facts, key=lambda f: f.value.nums[0])
@@ -207,7 +207,7 @@ class Knowledge:
         standard tier too — never the stale generations."""
         if "mortgage" not in q and "home loan" not in q:
             return None
-        if "loan_cap" in __import__("extract").parse_qualifiers(question, ""):
+        if "loan_cap" in parse_qualifiers(question, ""):
             return None  # a named cap is a single-fact question
         metric_pref = "APR" if "apr" in q else "rate"
         facts = [f for f in state.winners().values()
@@ -217,7 +217,6 @@ class Knowledge:
         # Prefer purchase programs, then group by term.
         facts.sort(key=lambda f: (0 if f.subject.lower().startswith("purchase") else 1,
                                   f.qualifiers.get("term_months", 0), f.qualifiers.get("loan_cap", 0)))
-        import re
         m = re.search(r"(\d+)\s*year", q)
         term = int(m.group(1)) * 12 if m else None
         by_term = {}
@@ -316,7 +315,6 @@ class Knowledge:
             return None
         if any(w in q for w in ("link", "url", "website", "page")):
             return None  # navigation question, not a rates question
-        from extract import parse_qualifiers
         if "term_months" in parse_qualifiers(question, ""):
             return None  # a named term is a single-fact question
         facts = [f for f in state.winners().values()
@@ -342,12 +340,10 @@ class Knowledge:
             return None
         if "1st" in q or "free checking" in q or "business" in q:
             return None  # a named product is a single-fact question
-        from extract import parse_qualifiers
         if "balance_band" in parse_qualifiers(question, ""):
             return None
-        import re as _re
 
-        def _money(x):
+        def money(x):
             return f"${x:,.0f}" if float(x).is_integer() else f"${x:,.2f}"
 
         groups: dict[str, list] = {}
@@ -360,7 +356,7 @@ class Knowledge:
             # Landing-page tables produce marketing-sentence "subjects".
             if f.page_kind != "rate_sheet" and "checking" not in f.url:
                 continue
-            base = _re.sub(r"\$.*$", "", f.subject).strip().rstrip("—-").strip()
+            base = re.sub(r"\$.*$", "", f.subject).strip().rstrip("—-").strip()
             if not base or len(base.split()) > 4:
                 continue
             groups.setdefault(base, []).append(f)
@@ -377,7 +373,7 @@ class Knowledge:
                     continue
                 seen_tiers.add(dedupe_key)
                 if band:
-                    rng = f"{_money(band[0])}+" if band[1] is None else f"{_money(band[0])}-{_money(band[1])}"
+                    rng = f"{money(band[0])}+" if band[1] is None else f"{money(band[0])}-{money(band[1])}"
                     tier_txt.append(f"{f.value.text} APY on {rng}")
                 else:
                     tier_txt.append(f"{f.value.text} APY")
@@ -388,8 +384,6 @@ class Knowledge:
 
     # -- Branches, links, service questions, prose fallback --------------------
     def _branch_answer(self, state, question, q):
-        import re as _re
-        from branches import resolve_claim
 
         # A named branch the registry has never heard of (e.g. "Mullan
         # Avenue") must be refused, not answered with generic hours.
@@ -398,14 +392,14 @@ class Knowledge:
             known.add(br.city.lower())
             known.add(br.address.split()[1].lower() if len(br.address.split()) > 1 else "")
         known |= {"hy-vee", "hyvee"}
-        m = _re.search(r"([A-Z][\w'’-]*(?:\s+[A-Z][\w'’-]*)*)\s+(?:branch|Branch)", question)
+        m = re.search(r"([A-Z][\w'’-]*(?:\s+[A-Z][\w'’-]*)*)\s+(?:branch|Branch)", question)
         if m and "dupaco" not in m.group(1).lower():
             name_tokens = {t.strip("'’-").lower() for t in m.group(1).split()}
             if name_tokens and not (name_tokens & known) and "how many" not in q:
                 return Answer(text=_REFUSAL, confident=False)
 
         # Hy-Vee closure (announcement article in the registry).
-        if _re.search(r"hy[-\s]?vee", q):
+        if re.search(r"hy[-\s]?vee", q):
             if not state.closures:
                 return None
             cl = state.closures[0]
@@ -426,7 +420,7 @@ class Knowledge:
         # How many branches? Dated prose claims conflict (19/20/22/23/24
         # across article generations); the newest dated claim wins.
         # Also handles stated-count lures ("Does Dupaco have 24 ...?").
-        stated = _re.search(r"(\d+)\s+branch", q)
+        stated = re.search(r"(\d+)\s+branch", q)
         if "branch" in q and ("how many" in q or stated):
             claim = resolve_claim(state.branch_claims)
             if claim is not None:
@@ -523,7 +517,6 @@ class Knowledge:
         return None
 
     def _service_answer(self, state, question, q):
-        import re as _re
         # Update contact information: Shine or the main phone number.
         if (("update" in q or "change" in q)
                 and any(w in q for w in ("contact", "address", "phone", "email", "mailing"))
@@ -538,7 +531,7 @@ class Knowledge:
             states_found: list[str] = []
             src_url = None
             for page in state.pages.values():
-                m = _re.search(r"counties throughout ([^.]+)", page.markdown or "")
+                m = re.search(r"counties throughout ([^.]+)", page.markdown or "")
                 if m:
                     for st in ("Iowa", "Illinois", "Wisconsin", "Minnesota"):
                         if st in m.group(1) and st not in states_found:
@@ -562,27 +555,23 @@ class Knowledge:
         neighbours."""
         if "%" in question or "apy" in q or "apr" in q or state.prose is None:
             return Answer(text=_REFUSAL, confident=False)
-        from query import _tokens as _qt
-        if "rate" in _qt(question):
+        if "rate" in _tokens(question):
             # Rate questions belong to the fact store; if it has no
             # published rate, the answer is a refusal, not a blog post.
             return Answer(text=_REFUSAL, confident=False)
-        from prose import rank_sentences
-        from query import _tokens as _all_tokens
         # Topic-absence refusal: if *none* of the question's content
         # tokens appears anywhere in the corpus, the site says nothing
         # about that topic and prose must not improvise. (A single
         # absent word proves nothing — paraphrases use synonyms the
         # site itself doesn't.)
-        content_tokens = {t for t in _all_tokens(question) if len(t) > 2}
+        content_tokens = {t for t in _tokens(question) if len(t) > 2}
         if content_tokens and not any(state.prose.postings.get(t)
                                       for t in content_tokens):
             return Answer(text=_REFUSAL, confident=False)
         # Acronym-absence refusal: an all-caps term the corpus never
         # uses (SWIFT) names something the site does not publish.
-        import re as _re2
-        for acro in _re2.findall(r"\b[A-Z]{3,}\b", question):
-            toks = {t for t in _all_tokens(acro) if len(t) > 2}
+        for acro in re.findall(r"\b[A-Z]{3,}\b", question):
+            toks = {t for t in _tokens(acro) if len(t) > 2}
             if toks and not any(state.prose.postings.get(t) for t in toks):
                 return Answer(text=_REFUSAL, confident=False)
         results = [(s, c) for s, c in state.prose.search(question, top_n=14)
@@ -614,11 +603,9 @@ class Knowledge:
         # whose tokens are rare in the corpus — the credit union's own
         # name is capitalized too but appears everywhere, so IDF
         # filters it out.
-        import re as _re
-        from query import _tokens as _qtok
         entity_words = []
-        for w in _re.findall(r"[A-Z][\w$]*", question):
-            rare = {t for t in _qtok(w)
+        for w in re.findall(r"[A-Z][\w$]*", question):
+            rare = {t for t in _tokens(w)
                     if len(t) > 2 and state.prose.idf.get(t, 0.0) >= 3.0}
             if rare:
                 entity_words.append((w, rare))
@@ -631,7 +618,7 @@ class Knowledge:
             # Pages *about* the entity carry its name in the URL slug
             # (forbes-ranks-..., ...hometart-grants): always candidates,
             # whatever chunk scoring made of their boilerplate.
-            slug = _re.sub(r"[^a-z]", "", anchor_word.lower())
+            slug = re.sub(r"[^a-z]", "", anchor_word.lower())
             if len(slug) >= 4:
                 for url in state.prose.by_url:
                     if slug in url.lower() and url not in seen_urls:
@@ -650,7 +637,7 @@ class Knowledge:
             for score, chunk in cands:
                 page_chunks = state.prose.by_url.get(chunk.url, [chunk])
                 sentences = [s for c in page_chunks for s in c.sentences]
-                if anchor and not any(anchor in _qtok(s) for s in sentences):
+                if anchor and not any(anchor in _tokens(s) for s in sentences):
                     continue  # page never mentions the named entity
                 text, best = rank_sentences(sentences, question, 2)
                 merit = best + 0.05 * score
@@ -658,7 +645,6 @@ class Knowledge:
                     merit += 0.5  # the page *about* the entity beats a mention
                 # Tie-break toward the highest stated count in the rendered
                 # text ("fifth time" over "second time" on a dead tie).
-                from prose import _ORDINALS
                 ords = [v for w_, v in _ORDINALS.items() if w_ in text.lower()]
                 merit += 0.02 * (max(ords) if ords else 0)
                 scored_entries.append((merit, best, text, chunk))
@@ -719,7 +705,7 @@ class Knowledge:
         if state is None:
             return []
         out = []
-        for key, group in state.resolved().items():
+        for group in state.resolved().values():
             values = sorted({f.value.text for f in group})
             if len(values) < 2:
                 continue
@@ -747,7 +733,6 @@ class Knowledge:
         # Prose claims conflict too: boilerplate branch counts from
         # different article generations (19/20/22/23/24). The claim from
         # the most recently dated page is the current one.
-        from branches import resolve_claim
         claim = resolve_claim(state.branch_claims)
         if claim is not None:
             values = sorted({c.value for c in state.branch_claims})

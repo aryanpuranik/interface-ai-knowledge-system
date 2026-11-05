@@ -34,7 +34,6 @@ _NUM_WORDS = {
 }
 _SYNONYMS = {"cd": "certificate", "cds": "certificate"}
 _YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
-_SINGLE_AMOUNT_RE = re.compile(r"\$\s*([\d,]+)(?:\.\d+)?")
 
 
 def normalise_question(question: str) -> str:
@@ -135,7 +134,7 @@ def find_facts(state, question: str, limit: int = 8):
     loan_q = any(w in q_norm for w in _LOAN_WORDS)
     winners = state.winners()
     scored = []
-    for key, fact in winners.items():
+    for fact in winners.values():
         if not _qualifier_compatible(q_qual, fact.qualifiers, q_years, q_point):
             continue
         f_tokens = _tokens(fact.subject + " " + fact.context)
@@ -202,8 +201,8 @@ def find_facts(state, question: str, limit: int = 8):
         # ranks below one that matches it. (An explicit *mismatch* is
         # already hard-filtered in _qualifier_compatible; this orders
         # the middle case the filter deliberately lets through.)
-        for _qk in ("term_months", "loan_cap", "balance_band"):
-            if _qk in q_qual and _qk not in fact.qualifiers:
+        for name in ("term_months", "loan_cap", "balance_band"):
+            if name in q_qual and name not in fact.qualifiers:
                 score -= 3
         if "flags" in q_qual:
             shared = set(q_qual["flags"]) & set(fact.qualifiers.get("flags", ()))

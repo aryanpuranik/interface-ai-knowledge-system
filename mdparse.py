@@ -24,7 +24,7 @@ def clean_text(text: str) -> str:
     text = _LINK_RE.sub(r"\1", text)
     text = _HTML_RE.sub(" ", text)
     text = text.replace("**", " ").replace("__", " ").replace("`", "")
-    text = text.replace("*", " ").replace("\\", " ").replace("\\", " ")
+    text = text.replace("*", " ").replace("\\", " ")
     return re.sub(r"\s+", " ", text).strip()
 
 
