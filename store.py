@@ -32,18 +32,25 @@ class SnapshotState:
         self.phone: tuple | None = None
         self.prose: ProseIndex | None = None
         self.links: set = set()
+        self._resolved_cache: dict | None = None
+        self._winners_cache: dict | None = None
 
     def resolved(self) -> dict[tuple, list[Fact]]:
-        """key -> all facts claiming that key in this snapshot, best first."""
-        groups: dict[tuple, list[Fact]] = {}
-        for f in self.facts:
-            groups.setdefault(f.key(), []).append(f)
-        for key in groups:
-            groups[key].sort(key=lambda f: (-f.authority, f.url))
-        return groups
+        """key -> all facts claiming that key in this snapshot, best first.
+        Memoized: resolution is recomputed by nearly every answer path."""
+        if self._resolved_cache is None:
+            groups: dict[tuple, list[Fact]] = {}
+            for f in self.facts:
+                groups.setdefault(f.key(), []).append(f)
+            for key in groups:
+                groups[key].sort(key=lambda f: (-f.authority, f.url))
+            self._resolved_cache = groups
+        return self._resolved_cache
 
     def winners(self) -> dict[tuple, Fact]:
-        return {k: v[0] for k, v in self.resolved().items()}
+        if self._winners_cache is None:
+            self._winners_cache = {k: v[0] for k, v in self.resolved().items()}
+        return self._winners_cache
 
 
 class FactStore:

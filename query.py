@@ -61,7 +61,18 @@ def question_years(question: str) -> list[int]:
     return [int(m.group(0)) for m in _YEAR_RE.finditer(question or "")]
 
 
-def _qualifier_compatible(q_qual: dict, f_qual: dict, q_years: list[int]) -> bool:
+_POINT_RE = re.compile(r"\$\s*([\d,]+(?:\.\d+)?)")
+
+
+def question_balance_point(question: str) -> float | None:
+    """A lone dollar amount in a question ("I keep $15,000 in Share
+    Savings") is a point balance: tier facts must contain it."""
+    amounts = [float(a.replace(",", "")) for a in _POINT_RE.findall(question or "")]
+    return max(amounts) if amounts else None
+
+
+def _qualifier_compatible(q_qual: dict, f_qual: dict, q_years: list[int],
+                          q_point: float | None = None) -> bool:
     """Hard filter: a question that names a term/band/cap must not be
     answered with a fact for a different term/band/cap. Model years are
     containment: a question year must fall inside the fact's band."""
@@ -82,6 +93,12 @@ def _qualifier_compatible(q_qual: dict, f_qual: dict, q_years: list[int]) -> boo
             if abs(fb[0] - qb[0]) >= 1 or fb[1] is None or abs(fb[1] - qb[1]) >= 1:
                 return False
         if qb[1] is None and fb[0] is not None and fb[0] > qb[0]:
+            return False
+    if q_point is not None and "balance_band" in f_qual and "balance_band" not in q_qual:
+        lo, hi = f_qual["balance_band"]
+        if lo is not None and q_point < lo:
+            return False
+        if hi is not None and q_point > hi + 0.99:
             return False
     return True
 
@@ -111,6 +128,7 @@ def find_facts(state, question: str, limit: int = 8):
     q_tokens = _tokens(q_norm)
     q_qual = parse_qualifiers(question, "")
     q_years = question_years(question)
+    q_point = question_balance_point(question) if "balance_band" not in q_qual else None
     metric = _metric_preference(q_norm)
     wants_business = "business" in q_norm
     deposit_q = any(w in q_norm for w in _DEPOSIT_WORDS)
@@ -118,7 +136,7 @@ def find_facts(state, question: str, limit: int = 8):
     winners = state.winners()
     scored = []
     for key, fact in winners.items():
-        if not _qualifier_compatible(q_qual, fact.qualifiers, q_years):
+        if not _qualifier_compatible(q_qual, fact.qualifiers, q_years, q_point):
             continue
         f_tokens = _tokens(fact.subject + " " + fact.context)
         overlap = q_tokens & f_tokens
@@ -130,6 +148,13 @@ def find_facts(state, question: str, limit: int = 8):
         n_alpha = len({t for t in distinctive if not t.isdigit()})
         n_digit = len(distinctive) - n_alpha
         score = 3 * n_alpha + n_digit + len(overlap - distinctive)
+        # Subject precision: a fact whose subject carries distinctive
+        # words the question never mentioned ("Jumbo") is a sibling
+        # variant, not the asked-about product; prefer the exact one.
+        subj_tokens = _tokens(fact.subject)
+        extra_subj = {t for t in subj_tokens - q_tokens
+                      if t not in _GENERIC and (len(t) > 2 or t.isdigit())}
+        score -= 0.5 * len(extra_subj)
         # Qualifier-family mismatch: a fact tiered by term is a loan fact;
         # a question tiered by balance is asking about a deposit (and the
         # reverse). Extra unasked-for restrictive qualifiers are evidence

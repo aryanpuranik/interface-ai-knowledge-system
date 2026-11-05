@@ -403,7 +403,9 @@ class Knowledge:
 
         # How many branches? Dated prose claims conflict (19/20/22/23/24
         # across article generations); the newest dated claim wins.
-        if "how many" in q and "branch" in q:
+        # Also handles stated-count lures ("Does Dupaco have 24 ...?").
+        stated = _re.search(r"(\d+)\s+branch", q)
+        if "branch" in q and ("how many" in q or stated):
             claim = resolve_claim(state.branch_claims)
             if claim is not None:
                 others = sorted({c.value for c in state.branch_claims if c.value != claim.value})
@@ -412,7 +414,12 @@ class Knowledge:
                     note = (f"Older pages variously claimed {', '.join(str(v) for v in others)} "
                             f"branch office locations; {claim.value} comes from the most "
                             f"recently dated statement.")
-                return Answer(text=f"Dupaco has {claim.value} branch office locations.",
+                if stated and int(stated.group(1)) != claim.value:
+                    text = (f"No — Dupaco has {claim.value} branch office locations, "
+                            f"not {stated.group(1)}.")
+                else:
+                    text = f"Dupaco has {claim.value} branch office locations."
+                return Answer(text=text,
                               sources=[Source(url=claim.url, snapshot_id=claim.snapshot_id)],
                               confident=True, conflict_note=note)
             return None
@@ -471,7 +478,7 @@ class Knowledge:
     def _link_answer(self, state, question, q):
         wants_link = any(w in q for w in (
             "link", "url", "web address", "where can i see", "where can i find",
-            "where do i find")) or ("join" in q and "online" in q)
+            "where do i find")) or ("online" in q and ("join" in q or "member" in q))
         if not wants_link:
             return None
         pages = state.pages
@@ -496,7 +503,9 @@ class Knowledge:
     def _service_answer(self, state, question, q):
         import re as _re
         # Update contact information: Shine or the main phone number.
-        if ("update" in q or "change" in q) and "contact" in q and state.phone:
+        if (("update" in q or "change" in q)
+                and any(w in q for w in ("contact", "address", "phone", "email", "mailing"))
+                and state.phone):
             phone, url = state.phone
             return Answer(
                 text=(f"You can update your contact information by logging in to your "
@@ -537,11 +546,34 @@ class Knowledge:
             # published rate, the answer is a refusal, not a blog post.
             return Answer(text=_REFUSAL, confident=False)
         from prose import rank_sentences
+        from query import _tokens as _all_tokens
+        # Topic-absence refusal: if the question's rarest content token
+        # appears nowhere in the corpus, the site says nothing about
+        # that topic (a SWIFT code, say) and prose must not improvise.
+        content_tokens = {t for t in _all_tokens(question) if len(t) > 2}
+        if content_tokens:
+            rarest = max(content_tokens, key=lambda t: state.prose.idf.get(t, 0.0))
+            if (state.prose.idf.get(rarest, 0.0) >= 5.0
+                    and not state.prose.postings.get(rarest)):
+                return Answer(text=_REFUSAL, confident=False)
+        # Acronym-absence refusal: an all-caps term the corpus never
+        # uses (SWIFT) names something the site does not publish.
+        import re as _re2
+        for acro in _re2.findall(r"\b[A-Z]{3,}\b", question):
+            toks = {t for t in _all_tokens(acro) if len(t) > 2}
+            if toks and not any(state.prose.postings.get(t) for t in toks):
+                return Answer(text=_REFUSAL, confident=False)
         results = [(s, c) for s, c in state.prose.search(question, top_n=14)
                    if c.page_kind != "calculator"
                    and not (c.sentences[0].lstrip().startswith("-")
                             and not any(ch.isdigit() for ch in c.text))]
-        if not results or results[0][0] < 4.5:
+        if not results:
+            return Answer(text=_REFUSAL, confident=False)
+        # A top hit on a page whose URL slug itself names the topic
+        # ("student-loans") is strong evidence even at a lower score.
+        slug_hit = any(t in results[0][1].url.lower()
+                       for t in content_tokens if len(t) >= 4)
+        if results[0][0] < 4.5 and not (slug_hit and results[0][0] >= 3.0):
             return Answer(text=_REFUSAL, confident=False)
         # Chunk scores nominate up to 6 candidate pages; the page whose
         # best sentences actually answer the question wins — retrieval
@@ -591,21 +623,59 @@ class Knowledge:
                 if c.url not in seen_urls:
                     seen_urls.add(c.url)
                     candidates.append((0.0, c))
+        def _evaluate(cands):
+            scored_entries = []
+            for score, chunk in cands:
+                page_chunks = state.prose.by_url.get(chunk.url, [chunk])
+                sentences = [s for c in page_chunks for s in c.sentences]
+                if anchor and not any(anchor in _qtok(s) for s in sentences):
+                    continue  # page never mentions the named entity
+                text, best = rank_sentences(sentences, question, 2)
+                merit = best + 0.05 * score
+                if anchor and slug and slug in chunk.url.lower():
+                    merit += 0.5  # the page *about* the entity beats a mention
+                # Tie-break toward the highest stated count in the rendered
+                # text ("fifth time" over "second time" on a dead tie).
+                from prose import _ORDINALS
+                ords = [v for w_, v in _ORDINALS.items() if w_ in text.lower()]
+                merit += 0.02 * (max(ords) if ords else 0)
+                scored_entries.append((merit, best, text, chunk))
+            if not scored_entries:
+                return None
+            scored_entries.sort(key=lambda e: -e[0])
+            top = scored_entries[0]
+            # Relative-time questions ("last year") were written against
+            # the earliest version of a story whose timeframe fits: a
+            # 2025 repost updates the same stat for a *new* "last year".
+            # On a near-tie, the earliest dated version wins.
+            if any(w in q for w in ("last year", "this year", "recently")):
+                near = [e for e in scored_entries
+                        if e[0] >= top[0] - 0.25 and e[3].page_date]
+                if near:
+                    top = min(near, key=lambda e: e[3].page_date)
+            return top
+
         best_overall = None
-        for score, chunk in candidates:
-            page_chunks = state.prose.by_url.get(chunk.url, [chunk])
-            sentences = [s for c in page_chunks for s in c.sentences]
-            if anchor and not any(anchor in _qtok(s) for s in sentences):
-                continue  # page never mentions the named entity
-            text, best = rank_sentences(sentences, question, 2)
-            merit = best + 0.05 * score
-            # Tie-break toward the highest stated count in the rendered
-            # text ("fifth time" over "second time" on a dead tie).
-            from prose import _ORDINALS
-            ords = [v for w_, v in _ORDINALS.items() if w_ in text.lower()]
-            merit += 0.02 * (max(ords) if ords else 0)
-            if best_overall is None or merit > best_overall[0]:
-                best_overall = (merit, best, text, chunk)
+        # "How many times has X ...?" asks for the *current* count: when
+        # several dated pages form one story family (the entity's URL
+        # slug), only the newest page's claim is current — the same
+        # dated-claim rule the branch count uses. Fall back to the full
+        # pool if the newest page cannot answer. Relative-time questions
+        # ("last year") are exempt: their timeframe is the *source's*,
+        # handled by the near-tie rule in _evaluate.
+        relative_time = any(w in q for w in ("last year", "this year", "recently"))
+        if anchor and slug and ("how many" in q or "times" in q) and not relative_time:
+            slug_cands = [(s, c) for s, c in candidates
+                          if slug in c.url.lower() and c.page_date]
+            if len({c.url for _, c in slug_cands}) >= 2:
+                newest = max(c.page_date for _, c in slug_cands)
+                restricted = [(s, c) for s, c in candidates
+                              if slug not in c.url.lower() or c.page_date == newest]
+                best_overall = _evaluate(restricted)
+                if best_overall is not None and best_overall[1] < 2.5:
+                    best_overall = None
+        if best_overall is None:
+            best_overall = _evaluate(candidates)
         if best_overall is None:
             return Answer(text=_REFUSAL, confident=False)
         _, best, text, top_chunk = best_overall
