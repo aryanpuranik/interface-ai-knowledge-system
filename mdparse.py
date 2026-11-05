@@ -24,7 +24,7 @@ def clean_text(text: str) -> str:
     text = _LINK_RE.sub(r"\1", text)
     text = _HTML_RE.sub(" ", text)
     text = text.replace("**", " ").replace("__", " ").replace("`", "")
-    text = text.replace("*", " ")
+    text = text.replace("*", " ").replace("\\", " ").replace("\\", " ")
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -51,12 +51,15 @@ def _is_separator(line: str) -> bool:
 
 
 class Table:
-    __slots__ = ("section", "headers", "rows")
+    __slots__ = ("section", "headers", "rows", "preamble")
 
-    def __init__(self, section: str, headers: list[str], rows: list[list[str]]):
+    def __init__(self, section: str, headers: list[str], rows: list[list[str]], preamble: str = ""):
         self.section = section
         self.headers = headers
         self.rows = rows
+        # Short plain-text label printed just above the table ("Home Loans -
+        # Purchase", "Rewards Visa"). Dupaco uses these instead of headings.
+        self.preamble = preamble
 
     def __repr__(self):  # pragma: no cover - debugging aid
         return f"Table(section={self.section!r}, headers={self.headers!r}, rows={len(self.rows)})"
@@ -66,6 +69,7 @@ def parse_tables(markdown: str) -> list[Table]:
     """Extract every markdown table, tagged with the section it appears in."""
     tables: list[Table] = []
     section = ""
+    pending = ""
     lines = (markdown or "").splitlines()
     i = 0
     while i < len(lines):
@@ -73,8 +77,17 @@ def parse_tables(markdown: str) -> list[Table]:
         hm = _HEADING_RE.match(line)
         if hm:
             section = clean_text(hm.group(2))
+            pending = ""
             i += 1
             continue
+        stripped = line.strip()
+        if stripped and not stripped.startswith("|"):
+            cleaned = clean_text(stripped)
+            # A short, sentence-free plain line is a label for what follows.
+            if (len(cleaned) <= 70 and cleaned.count(" ") <= 8 and "." not in cleaned
+                    and "](" not in stripped
+                    and not stripped.startswith(("[", "!", "*", "-", "#", ">"))):
+                pending = cleaned
         if line.strip().startswith("|") and i + 1 < len(lines) and _is_separator(lines[i + 1]):
             headers = _split_row(line)
             rows: list[list[str]] = []
@@ -87,7 +100,8 @@ def parse_tables(markdown: str) -> list[Table]:
                     rows.append(row)
                 i += 1
             if rows:
-                tables.append(Table(section, headers, rows))
+                tables.append(Table(section, headers, rows, pending))
+            pending = ""
             continue
         i += 1
     return tables
