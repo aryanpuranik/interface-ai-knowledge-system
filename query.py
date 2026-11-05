@@ -197,6 +197,14 @@ def find_facts(state, question: str, limit: int = 8):
             score -= 3
         if "term_months" in q_qual and fact.qualifiers.get("term_months") == q_qual["term_months"]:
             score += 4
+        # Unspecified is weaker than explicit: when the question names
+        # a term, cap or band, a fact that doesn't specify it at all
+        # ranks below one that matches it. (An explicit *mismatch* is
+        # already hard-filtered in _qualifier_compatible; this orders
+        # the middle case the filter deliberately lets through.)
+        for _qk in ("term_months", "loan_cap", "balance_band"):
+            if _qk in q_qual and _qk not in fact.qualifiers:
+                score -= 3
         if "flags" in q_qual:
             shared = set(q_qual["flags"]) & set(fact.qualifiers.get("flags", ()))
             score += 2 * len(shared)

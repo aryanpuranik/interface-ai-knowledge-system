@@ -291,10 +291,17 @@ class Knowledge:
         cards = {s: v for s, v in cards.items() if s not in drop}
         if not cards:
             return None
-        # A generic cards question wants the whole family; a named card is
-        # handled by single-fact lookup unless both segments are in play.
+        # A question that names one card gets that card's answer alone —
+        # listing the whole family would bury the asked-for APR among
+        # other cards' numbers. The longest matching base name wins, so
+        # "business platinum" beats "platinum" when both appear.
         named = [s for s in cards if s.lower().split(" visa")[0] in q]
-        if len(cards) < 2 and not named:
+        if named:
+            named.sort(key=lambda s: -len(s.split(" visa")[0]))
+            f, _b = cards[named[0]]
+            return Answer(text=f"The APR for {f.subject} is {f.value.text}.",
+                          sources=[_src(f)], confident=True)
+        if len(cards) < 2:
             return None
         order = sorted(cards.values(), key=lambda x: (x[1], x[0].subject))
         parts = [f"{f.subject}: {f.value.text} APR" for f, _ in order]
@@ -562,15 +569,15 @@ class Knowledge:
             return Answer(text=_REFUSAL, confident=False)
         from prose import rank_sentences
         from query import _tokens as _all_tokens
-        # Topic-absence refusal: if the question's rarest content token
-        # appears nowhere in the corpus, the site says nothing about
-        # that topic (a SWIFT code, say) and prose must not improvise.
+        # Topic-absence refusal: if *none* of the question's content
+        # tokens appears anywhere in the corpus, the site says nothing
+        # about that topic and prose must not improvise. (A single
+        # absent word proves nothing — paraphrases use synonyms the
+        # site itself doesn't.)
         content_tokens = {t for t in _all_tokens(question) if len(t) > 2}
-        if content_tokens:
-            rarest = max(content_tokens, key=lambda t: state.prose.idf.get(t, 0.0))
-            if (state.prose.idf.get(rarest, 0.0) >= 5.0
-                    and not state.prose.postings.get(rarest)):
-                return Answer(text=_REFUSAL, confident=False)
+        if content_tokens and not any(state.prose.postings.get(t)
+                                      for t in content_tokens):
+            return Answer(text=_REFUSAL, confident=False)
         # Acronym-absence refusal: an all-caps term the corpus never
         # uses (SWIFT) names something the site does not publish.
         import re as _re2

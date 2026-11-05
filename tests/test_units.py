@@ -190,6 +190,61 @@ class TestProse(unittest.TestCase):
         self.assertTrue(all("Item number" in p for p in pieces))
 
 
+def _fact(subject, metric, text, nums, unit="%", qualifiers=None,
+          authority=40, kind="product", context=""):
+    from extract import Fact, Value
+    return Fact(subject=subject, context=context or subject, metric=metric,
+                value=Value(text, nums, unit), qualifiers=qualifiers or {},
+                url="https://www.dupaco.com/x", page_kind=kind,
+                authority=authority)
+
+
+def _ks_with_facts(facts):
+    ks = solution.build()
+    ks.ingest(Snapshot("s1", "2026-09-28", [
+        Page("https://www.dupaco.com/", "Home", "# Dupaco\n\nWelcome to Dupaco Credit Union membership.")]))
+    ks.store.states[-1].facts.extend(facts)
+    return ks
+
+
+class TestQualifierScoring(unittest.TestCase):
+    def test_unspecified_band_ranks_below_explicit_match(self):
+        # The unbanded fact sits on the rate sheet (higher authority);
+        # the banded fact must still win a banded question — "doesn't
+        # specify" ranks below "matches", above only "mismatches".
+        banded = _fact("Share Savings", "APY", "0.15%", (0.15,),
+                       qualifiers={"balance_band": (5000.0, 24999.99)}, authority=40)
+        generic = _fact("Share Savings", "APY", "0.99%", (0.99,),
+                        qualifiers={}, authority=50, kind="rate_sheet")
+        ks = _ks_with_facts([generic, banded])
+        ranked = query.find_facts(ks.store.states[-1],
+                                  "What APY does Share Savings pay on $5,000 - $24,999.99?")
+        self.assertEqual(ranked[0][1].value.text, "0.15%")
+
+
+class TestCardComposer(unittest.TestCase):
+    def _ks(self):
+        return _ks_with_facts([
+            _fact("Platinum Visa", "APR", "12.50%-19.50%", (12.5, 19.5),
+                  qualifiers={"segment": "personal"}, context="Credit Cards"),
+            _fact("Rewards Visa", "APR", "15.50%", (15.5,),
+                  qualifiers={"segment": "personal"}, context="Credit Cards"),
+            _fact("Business Platinum Visa", "APR", "15.50%", (15.5,),
+                  qualifiers={"segment": "business"}, context="Credit Cards"),
+        ])
+
+    def test_family_lists_distinct_cards_sharing_an_apr(self):
+        a = self._ks().answer("What are the APR ranges on Dupaco's Visa cards?")
+        self.assertIn("Platinum Visa", a.text)
+        self.assertIn("Rewards Visa", a.text)
+        self.assertIn("Business Platinum Visa", a.text)
+
+    def test_named_card_gets_a_single_card_answer(self):
+        a = self._ks().answer("What is the APR on the Platinum Visa card?")
+        self.assertIn("12.50%-19.50%", a.text)
+        self.assertNotIn("15.50%", a.text)
+
+
 class TestEndToEnd(unittest.TestCase):
     def test_current_and_as_of_answers(self):
         ks = make_ks()
@@ -212,6 +267,15 @@ class TestEndToEnd(unittest.TestCase):
         self.assertFalse(arm.confident)
         swift = ks.answer("What is Dupaco's SWIFT code?")
         self.assertFalse(swift.confident)
+        absent = ks.answer("What is the zorblax quotient for members?")
+        self.assertFalse(absent.confident)
+
+    def test_as_of_before_first_snapshot_clamps_to_earliest(self):
+        # Documented boundary rule (NOTES.md): a date before the first
+        # crawl uses the earliest snapshot — the earliest evidence
+        # there is — rather than refusing.
+        ks = make_ks()
+        self.assertEqual(ks.store.state_as_of("2020-01-01").taken_on, "2026-05-12")
 
 
 if __name__ == "__main__":

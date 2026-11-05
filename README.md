@@ -35,11 +35,18 @@ and limitations.
 
 ## Run
 
+From **this repo's** folder:
+
 ```bash
-python3 -m unittest discover -s tests                 # unit tests
-python3 tools/demo.py --kit <participant kit>         # interactive demo
-python3 tools/simulate.py --kit <participant kit>     # hidden-set simulator
-python3 harness/run_eval.py --submission . --eval eval/public_eval.jsonl --out results/x   # from the kit
+python3 -m unittest discover -s tests
+python3 tools/demo.py --kit <participant kit folder>
+python3 tools/simulate.py --kit <participant kit folder>
+```
+
+From the **participant kit** folder (point `--submission` at this repo):
+
+```bash
+python3 harness/run_eval.py --submission <path to this repo> --eval eval/public_eval.jsonl --out results/x
 ```
 
 The supplied website snapshots are interface.ai's data and are **not**
