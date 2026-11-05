@@ -9,7 +9,13 @@ which is also what powers conflicts().
 """
 from __future__ import annotations
 
+import re
+
+import branches as branch_mod
 from extract import Fact, extract_facts
+from prose import ProseIndex
+
+_LINK_RE = re.compile(r"\]\((https?://[^)\s]+)\)")
 
 
 class SnapshotState:
@@ -18,6 +24,14 @@ class SnapshotState:
         self.taken_on = taken_on
         self.facts: list[Fact] = []
         self.pages: dict = {}          # url -> Page (kept for later retrieval fallback)
+        # Phase 3 registries, built alongside the facts at ingest.
+        self.branch_list: list = []
+        self.hours = None
+        self.closures: list = []
+        self.branch_claims: list = []
+        self.phone: tuple | None = None
+        self.prose: ProseIndex | None = None
+        self.links: set = set()
 
     def resolved(self) -> dict[tuple, list[Fact]]:
         """key -> all facts claiming that key in this snapshot, best first."""
@@ -41,10 +55,19 @@ class FactStore:
         state = SnapshotState(snapshot.snapshot_id, snapshot.taken_on)
         for page in snapshot.pages:
             state.pages[page.url] = page
+            state.links.update(_LINK_RE.findall(page.markdown or ""))
             for fact in extract_facts(page):
                 fact.snapshot_id = snapshot.snapshot_id
                 fact.taken_on = snapshot.taken_on
                 state.facts.append(fact)
+        pages = list(state.pages.values())
+        sid = snapshot.snapshot_id
+        state.branch_list = branch_mod.parse_locator(pages, sid)
+        state.hours = branch_mod.parse_hours(pages)
+        state.closures = branch_mod.parse_closures(pages, sid)
+        state.branch_claims = branch_mod.parse_branch_count_claims(pages, sid)
+        state.phone = branch_mod.contact_phone(pages)
+        state.prose = ProseIndex.build(pages, sid)
         self.states.append(state)
         return state
 

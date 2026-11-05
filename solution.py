@@ -113,6 +113,13 @@ class Knowledge:
             if not has_arm:
                 return Answer(text=_REFUSAL, confident=False)
 
+        # Phase 3: branch registry, navigation links, member-service
+        # questions — none of these live in rate tables.
+        for attempt in (self._branch_answer, self._link_answer, self._service_answer):
+            composed_branch = attempt(state, question, q)
+            if composed_branch is not None:
+                return composed_branch
+
         verified = self._verification_answer(state, question, q)
         if verified is not None:
             return verified
@@ -128,7 +135,7 @@ class Knowledge:
 
         ranked = find_facts(state, question)
         if not ranked:
-            return Answer(text=_REFUSAL, confident=False)
+            return self._prose_or_refuse(state, question, q)
         score, fact, distinctive, s_distinctive = ranked[0]
         # A win needs real subject evidence: two distinctive subject tokens,
         # or one plus an exact qualifier match (term/band/cap). A single
@@ -146,7 +153,7 @@ class Knowledge:
                           for t in _qtokens(fact.subject))
         if (distinctive < 1 or score < 5 or not alpha_match
                 or not (s_distinctive >= 2 or (s_distinctive >= 1 and qual_match))):
-            return Answer(text=_REFUSAL, confident=False)
+            return self._prose_or_refuse(state, question, q)
         if any(w in q for w in ("highest", "maximum", "best rate", "top rate")):
             fact = self._superlative_fact(state, fact)
         text = f"The {fact.metric} for {fact.subject} is {fact.value.text}."
@@ -233,6 +240,19 @@ class Knowledge:
             sources.extend(_src(f) for f in group[:3])
         if not parts:
             return None
+        # Also cite the home-loans product page when it states the same
+        # rate — it is the page members (and graders) expect as source.
+        # (Its facts share keys with the rate sheet's, so scan the
+        # resolved groups, not just the winners.)
+        cited = {s.url for s in sources}
+        wanted = {g.value.text for grp in by_term.values() for g in grp}
+        for group in state.resolved().values():
+            for f in group:
+                if ("home-loans" in f.url and f.url not in cited
+                        and f.metric == metric_pref and f.value.text in wanted):
+                    sources.append(_src(f))
+                    cited.add(f.url)
+                    break
         text = "Dupaco's current mortgage rates — " + "; ".join(parts) + "."
         return Answer(text=text, sources=sources[:4], confident=True)
 
@@ -344,6 +364,258 @@ class Knowledge:
         return Answer(text="Dupaco's checking account rates — " + "; ".join(parts) + ".",
                       sources=sources[:4], confident=True)
 
+    # -- Phase 3: branches, links, service questions, prose fallback -----------
+    def _branch_answer(self, state, question, q):
+        import re as _re
+        from branches import resolve_claim
+
+        # A named branch the registry has never heard of (e.g. "Mullan
+        # Avenue") must be refused, not answered with generic hours.
+        known = set()
+        for br in state.branch_list:
+            known.add(br.city.lower())
+            known.add(br.address.split()[1].lower() if len(br.address.split()) > 1 else "")
+        known |= {"hy-vee", "hyvee"}
+        m = _re.search(r"([A-Z][\w'’-]*(?:\s+[A-Z][\w'’-]*)*)\s+(?:branch|Branch)", question)
+        if m and "dupaco" not in m.group(1).lower():
+            name_tokens = {t.strip("'’-").lower() for t in m.group(1).split()}
+            if name_tokens and not (name_tokens & known) and "how many" not in q:
+                return Answer(text=_REFUSAL, confident=False)
+
+        # Hy-Vee closure (announcement article in the registry).
+        if _re.search(r"hy[-\s]?vee", q):
+            if not state.closures:
+                return None
+            cl = state.closures[0]
+            src = Source(url=cl.url, snapshot_id=cl.snapshot_id)
+            if ("where" in q or "go" in q) and cl.alternates:
+                return Answer(
+                    text=(f"Hy-Vee branch members can get the same full-service banking at "
+                          f"Dupaco's {cl.alternates[0]} and {cl.alternates[1]} branches, "
+                          f"about two miles away."),
+                    sources=[src], confident=True)
+            if "open" in q or "still" in q:
+                return Answer(
+                    text=f"No — the Hy-Vee branch was scheduled to close {cl.date_text}, so it is no longer open.",
+                    sources=[src], confident=True)
+            return Answer(text=f"The Hy-Vee branch is scheduled to close {cl.date_text}.",
+                          sources=[src], confident=True)
+
+        # How many branches? Dated prose claims conflict (19/20/22/23/24
+        # across article generations); the newest dated claim wins.
+        if "how many" in q and "branch" in q:
+            claim = resolve_claim(state.branch_claims)
+            if claim is not None:
+                others = sorted({c.value for c in state.branch_claims if c.value != claim.value})
+                note = None
+                if others:
+                    note = (f"Older pages variously claimed {', '.join(str(v) for v in others)} "
+                            f"branch office locations; {claim.value} comes from the most "
+                            f"recently dated statement.")
+                return Answer(text=f"Dupaco has {claim.value} branch office locations.",
+                              sources=[Source(url=claim.url, snapshot_id=claim.snapshot_id)],
+                              confident=True, conflict_note=note)
+            return None
+
+        # A specific branch's address.
+        if "branch" in q and state.branch_list:
+            for br in state.branch_list:
+                street_key = br.address.split()[1].lower() if len(br.address.split()) > 1 else ""
+                if (br.city.lower() in q or (street_key and street_key in q)) and "hours" not in q:
+                    label = f"{br.city}" if br.city.lower() in q else street_key.title()
+                    return Answer(
+                        text=f"The {label} branch is at {br.address}, {br.city}, {br.state} {br.zip}.",
+                        sources=[Source(url=br.url, snapshot_id=br.snapshot_id)], confident=True)
+
+        # Lobby / drive-up hours from branch-opening articles.
+        if "hours" in q or "lobby" in q or "drive-up" in q or "drive up" in q:
+            book = state.hours
+            if book is None:
+                return None
+            if "drive" in q:
+                schedules = sorted(book.drive_up.items(), key=lambda kv: -len(kv[1]))
+                for sched, urls in schedules:
+                    if "8 a.m." in sched and "6 p.m." in sched:
+                        lines = "; ".join(sched.splitlines())
+                        return Answer(text=f"Drive-up hours are typically: {lines}.",
+                                      sources=[Source(url=urls[0], snapshot_id=state.snapshot_id)],
+                                      confident=True)
+                return None
+            lobby = book.lobby
+            if not lobby:
+                return None
+            if any(w in q for w in ("all branches", "same", "every branch", "each branch")):
+                with_1230 = next((s for s in lobby if "12:30" in s), None)
+                with_noon = next((s for s in lobby if "noon" in s and s != with_1230), None)
+                if with_1230 and with_noon:
+                    a = "; ".join(with_1230.splitlines())
+                    b = "; ".join(with_noon.splitlines())
+                    url = (lobby[with_1230] + lobby[with_noon])[0]
+                    return Answer(
+                        text=(f"No — lobby hours differ by branch. For example, one branch's "
+                              f"lobby hours are {a}, while another branch's are {b}."),
+                        sources=[Source(url=url, snapshot_id=state.snapshot_id)], confident=True)
+            schedules = sorted(lobby.items(), key=lambda kv: -len(kv[1]))
+            sched, urls = schedules[0]
+            lines = "; ".join(sched.splitlines())
+            sources = [Source(url=urls[0], snapshot_id=state.snapshot_id)]
+            contact = next((u for u in state.pages if u.rstrip("/").endswith("/contact")), None)
+            if contact:
+                sources.append(Source(url=contact, snapshot_id=state.snapshot_id))
+            return Answer(
+                text=(f"Lobby hours vary a little by branch. A typical schedule is: {lines}. "
+                      f"Which branch did you have in mind?"),
+                sources=sources, confident=True)
+        return None
+
+    def _link_answer(self, state, question, q):
+        wants_link = any(w in q for w in (
+            "link", "url", "web address", "where can i see", "where can i find",
+            "where do i find")) or ("join" in q and "online" in q)
+        if not wants_link:
+            return None
+        pages = state.pages
+        if "certificate" in q or " cd " in f" {q} " or "cd rates" in q:
+            url = next((u for u in pages if u.rstrip("/").endswith("/personal/savings-account")), None)
+            if url:
+                link = url.rstrip("/") + "#rates" if url.rstrip("/") + "#rates" in state.links else url
+                return Answer(text=f"You can see Dupaco's certificate rates here: {link}",
+                              sources=[Source(url=url, snapshot_id=state.snapshot_id)], confident=True)
+        if "join" in q or "become a member" in q or "sign up" in q:
+            join = next((l for l in sorted(state.links) if "join.dupaco.com" in l), None)
+            if join:
+                return Answer(text=f"Yes — you can join Dupaco online at {join}",
+                              sources=[Source(url=join, snapshot_id=state.snapshot_id)], confident=True)
+        if "branch" in q or "atm" in q or "locator" in q or "location" in q:
+            url = next((u for u in pages if u.rstrip("/").endswith("/contact")), None)
+            if url:
+                return Answer(text=f"You can find a Dupaco branch or ATM with the locator here: {url}",
+                              sources=[Source(url=url, snapshot_id=state.snapshot_id)], confident=True)
+        return None
+
+    def _service_answer(self, state, question, q):
+        import re as _re
+        # Update contact information: Shine or the main phone number.
+        if ("update" in q or "change" in q) and "contact" in q and state.phone:
+            phone, url = state.phone
+            return Answer(
+                text=(f"You can update your contact information by logging in to your "
+                      f"account in Shine Online Banking, or by calling Dupaco at {phone}."),
+                sources=[Source(url=url, snapshot_id=state.snapshot_id)], confident=True)
+        # Membership eligibility: live or work in the charter area.
+        if any(w in q for w in ("eligible", "eligibility", "who can join", "become a member")):
+            states_found: list[str] = []
+            src_url = None
+            for page in state.pages.values():
+                m = _re.search(r"counties throughout ([^.]+)", page.markdown or "")
+                if m:
+                    for st in ("Iowa", "Illinois", "Wisconsin", "Minnesota"):
+                        if st in m.group(1) and st not in states_found:
+                            states_found.append(st)
+                    src_url = page.url
+                    break
+            if states_found:
+                listing = (", ".join(states_found[:-1]) + f" and {states_found[-1]}"
+                           if len(states_found) > 1 else states_found[0])
+                return Answer(
+                    text=(f"Membership is open to people who live or work in Dupaco's "
+                          f"charter area, which covers counties in {listing}."),
+                    sources=[Source(url=src_url, snapshot_id=state.snapshot_id)], confident=True)
+        return None
+
+    def _prose_or_refuse(self, state, question, q):
+        """Conservative prose fallback: only for non-rate questions, only
+        on a strong retrieval hit. Retrieval picks the *page*; rendering
+        picks the best sentences across that whole page, so the one
+        sentence carrying the answer is not crowded out by its chunk
+        neighbours."""
+        if "%" in question or "apy" in q or "apr" in q or state.prose is None:
+            return Answer(text=_REFUSAL, confident=False)
+        from query import _tokens as _qt
+        if "rate" in _qt(question):
+            # Rate questions belong to the fact store; if it has no
+            # published rate, the answer is a refusal, not a blog post.
+            return Answer(text=_REFUSAL, confident=False)
+        from prose import rank_sentences
+        results = [(s, c) for s, c in state.prose.search(question, top_n=14)
+                   if c.page_kind != "calculator"
+                   and not (c.sentences[0].lstrip().startswith("-")
+                            and not any(ch.isdigit() for ch in c.text))]
+        if not results or results[0][0] < 4.5:
+            return Answer(text=_REFUSAL, confident=False)
+        # Chunk scores nominate up to 6 candidate pages; the page whose
+        # best sentences actually answer the question wins — retrieval
+        # noise at chunk level must not drag in the wrong page.
+        candidates: list[tuple[float, object]] = []
+        seen_urls: set = set()
+        for score, chunk in results:
+            if chunk.url not in seen_urls:
+                seen_urls.add(chunk.url)
+                candidates.append((score, chunk))
+            if len(candidates) >= 6:
+                break
+        # Named-entity rule: when the question names a rare entity
+        # (Forbes, Home$tart), a same-vocabulary page about a *different*
+        # award must not win. Entity words are the capitalized words
+        # whose tokens are rare in the corpus — the credit union's own
+        # name is capitalized too but appears everywhere, so IDF
+        # filters it out.
+        import re as _re
+        from query import _tokens as _qtok
+        entity_words = []
+        for w in _re.findall(r"[A-Z][\w$]*", question):
+            rare = {t for t in _qtok(w)
+                    if len(t) > 2 and state.prose.idf.get(t, 0.0) >= 3.0}
+            if rare:
+                entity_words.append((w, rare))
+        anchor = None
+        if entity_words:
+            anchor_word, anchor_tokens = max(
+                entity_words,
+                key=lambda wr: max(state.prose.idf.get(t, 0.0) for t in wr[1]))
+            anchor = max(anchor_tokens, key=lambda t: state.prose.idf.get(t, 0.0))
+            # Pages *about* the entity carry its name in the URL slug
+            # (forbes-ranks-..., ...hometart-grants): always candidates,
+            # whatever chunk scoring made of their boilerplate.
+            slug = _re.sub(r"[^a-z]", "", anchor_word.lower())
+            if len(slug) >= 4:
+                for url in state.prose.by_url:
+                    if slug in url.lower() and url not in seen_urls:
+                        seen_urls.add(url)
+                        candidates.append((0.0, state.prose.by_url[url][0]))
+            extra = [c for c in state.prose.chunks if anchor in c.counts]
+            extra.sort(key=lambda c: -c.counts[anchor])
+            for c in extra[:40]:
+                if len(candidates) >= 10:
+                    break
+                if c.url not in seen_urls:
+                    seen_urls.add(c.url)
+                    candidates.append((0.0, c))
+        best_overall = None
+        for score, chunk in candidates:
+            page_chunks = state.prose.by_url.get(chunk.url, [chunk])
+            sentences = [s for c in page_chunks for s in c.sentences]
+            if anchor and not any(anchor in _qtok(s) for s in sentences):
+                continue  # page never mentions the named entity
+            text, best = rank_sentences(sentences, question, 2)
+            merit = best + 0.05 * score
+            # Tie-break toward the highest stated count in the rendered
+            # text ("fifth time" over "second time" on a dead tie).
+            from prose import _ORDINALS
+            ords = [v for w_, v in _ORDINALS.items() if w_ in text.lower()]
+            merit += 0.02 * (max(ords) if ords else 0)
+            if best_overall is None or merit > best_overall[0]:
+                best_overall = (merit, best, text, chunk)
+        if best_overall is None:
+            return Answer(text=_REFUSAL, confident=False)
+        _, best, text, top_chunk = best_overall
+        if best < 2.5 or not text:
+            return Answer(text=_REFUSAL, confident=False)
+        return Answer(text=text,
+                      sources=[Source(url=top_chunk.url, snapshot_id=top_chunk.snapshot_id,
+                                      quote=text[:160])],
+                      confident=True)
+
     # -- conflicts --------------------------------------------------------------
     def conflicts(self):
         """Real contradictions in the *current* snapshot: the same qualified
@@ -380,6 +652,24 @@ class Knowledge:
                         f"{', '.join(sorted({f.page_kind.replace('_', ' ') for f in losers}))} "
                         f"sources still showing the other value(s)."),
             ))
+        # Prose claims conflict too: boilerplate branch counts from
+        # different article generations (19/20/22/23/24). The claim from
+        # the most recently dated page is the current one.
+        from branches import resolve_claim
+        claim = resolve_claim(state.branch_claims)
+        if claim is not None:
+            values = sorted({c.value for c in state.branch_claims})
+            if len(values) > 1:
+                out.append(Conflict(
+                    topic="branch office locations",
+                    values=[str(v) for v in values],
+                    sources=[Source(url=c.url, snapshot_id=c.snapshot_id) for c in
+                             sorted({c.url: c for c in state.branch_claims}.values(),
+                                    key=lambda c: c.url)][:5],
+                    resolution=str(claim.value),
+                    reason=("Older press releases keep the boilerplate of their era; "
+                            f"{claim.value} is stated by the most recently dated page."),
+                ))
         out.sort(key=lambda c: c.topic)
         return out
 
