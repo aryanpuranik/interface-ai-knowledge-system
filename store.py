@@ -24,7 +24,7 @@ class SnapshotState:
         self.taken_on = taken_on
         self.facts: list[Fact] = []
         self.pages: dict = {}          # url -> Page (kept for later retrieval fallback)
-        # Phase 3 registries, built alongside the facts at ingest.
+        # Registries built alongside the facts at ingest.
         self.branch_list: list = []
         self.hours = None
         self.closures: list = []

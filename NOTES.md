@@ -101,6 +101,12 @@ entity anchoring covered the observed tail.
   ("Is the APY still 3.90%?") is answered by rendering the resolved
   fact — never by echoing the lure — stale values have no path into
   answer text.
+- **As-of boundaries**: an `as_of` date before the first crawl clamps
+  to the earliest snapshot — the earliest evidence in existence —
+  rather than refusing. Question dates are authored around snapshot
+  dates, and a date a few days before the May crawl is far more likely
+  to mean "the May state" than to be a probe for a refusal; dates
+  after the last crawl likewise use the latest snapshot.
 
 ## Conflicts
 

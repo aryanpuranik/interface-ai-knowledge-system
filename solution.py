@@ -113,7 +113,7 @@ class Knowledge:
             if not has_arm:
                 return Answer(text=_REFUSAL, confident=False)
 
-        # Phase 3: branch registry, navigation links, member-service
+        # Branch registry, navigation links, member-service
         # questions — none of these live in rate tables.
         for attempt in (self._branch_answer, self._link_answer, self._service_answer):
             composed_branch = attempt(state, question, q)
@@ -275,7 +275,10 @@ class Knowledge:
             is_biz = f.qualifiers.get("segment") == "business" or f.subject.startswith("Business")
             cards.setdefault(f.subject, (f, is_biz))
         # Collapse label variants of the same card at the same APR
-        # ("Platinum Visa" vs "Platinum Visa Rate" on different pages).
+        # ("Platinum Visa" vs "Platinum Visa Rate" on different pages):
+        # only a prefix-variant label is the same card restated. Two
+        # genuinely different cards that happen to share an APR are
+        # both kept — a shared price is not an identity.
         by_value: dict[str, list[str]] = {}
         for subj, (f, _b) in cards.items():
             by_value.setdefault(f.value.text, []).append(subj)
@@ -283,7 +286,8 @@ class Knowledge:
         for subjects in by_value.values():
             if len(subjects) > 1:
                 keep = min(subjects, key=len)
-                drop.update(s for s in subjects if s != keep)
+                drop.update(s for s in subjects
+                            if s != keep and s.lower().startswith(keep.lower()))
         cards = {s: v for s, v in cards.items() if s not in drop}
         if not cards:
             return None
@@ -375,7 +379,7 @@ class Knowledge:
         return Answer(text="Dupaco's checking account rates — " + "; ".join(parts) + ".",
                       sources=sources[:4], confident=True)
 
-    # -- Phase 3: branches, links, service questions, prose fallback -----------
+    # -- Branches, links, service questions, prose fallback --------------------
     def _branch_answer(self, state, question, q):
         import re as _re
         from branches import resolve_claim
