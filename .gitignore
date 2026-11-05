@@ -1,0 +1,10 @@
+# The supplied website snapshots are interface.ai's data, shared for this
+# assignment only. They must never be committed or redistributed.
+snapshots/
+snapshots_zip/
+*.zip
+results/
+__pycache__/
+*.pyc
+.env
+.DS_Store

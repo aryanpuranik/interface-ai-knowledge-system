@@ -1,0 +1,4 @@
+# No third-party packages. The solution uses only the Python 3.11
+# standard library, so there is nothing to install and no API keys
+# are required. This file is kept intentionally (empty of deps) so the
+# submission checklist item is explicit rather than missing.
