@@ -151,7 +151,8 @@ the answer given lists every certificate term with its APY.
 
 Development progression on the same harness: starter baseline 0.093 →
 fact store + extraction 0.155 → qualifier/composer work 0.507 → branch
-registry + prose fallback 0.969 (held through the Phase 4 hardening).
+registry + prose fallback 0.969 (and held through the hardening
+rounds that followed).
 
 ## Testing the hidden set without seeing it
 
@@ -176,7 +177,7 @@ Also verified: identical per-question scores under three different
 `PYTHONHASHSEED` values (no hash-order nondeterminism), and a
 320-answer sweep (every public question × every snapshot date) with no
 crashes. Unit tests (`tests/`, stdlib `unittest`, synthetic fixtures):
-18 passing.
+22 passing.
 
 ## Decision log
 
